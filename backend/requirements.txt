@@ -1,4 +1,4 @@
-pyttsx3
+sqlalchemy
 moviepy
 groq
 ffmpeg

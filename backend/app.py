@@ -1,135 +1,202 @@
+# ============================================================
+# SyncMind Backend — app.py (Frontend-Compatible Version)
+# Matches exact endpoint names and response keys that
+# page.js expects: /transcribe, /summarize, /question
+# ============================================================
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os
-import tempfile
-import pyttsx3
-from moviepy import VideoFileClip
 from groq import Groq
 from dotenv import load_dotenv
-# Load environment variables from .env file
+import os
+import tempfile
+
+# Database imports
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from datetime import datetime
+
 load_dotenv()
 
-# Initialize FastAPI app
+# ============================================================
+# DATABASE SETUP
+# SQLite = zero config, single file (syncmind.db appears in
+# your backend folder automatically on first run)
+# ============================================================
+engine = create_engine(
+    "sqlite:///./syncmind.db",
+    connect_args={"check_same_thread": False}
+)
+Base = declarative_base()
+SessionLocal = sessionmaker(bind=engine)
+
+class Meeting(Base):
+    __tablename__ = "meetings"
+    id          = Column(Integer, primary_key=True, index=True)
+    meeting_name = Column(String, default="Untitled Meeting")
+    transcript  = Column(Text)
+    summary     = Column(Text)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+Base.metadata.create_all(bind=engine)
+
+# ============================================================
+# APP + GROQ CLIENT
+# ============================================================
 app = FastAPI()
 
-# Add CORS middleware to allow all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Initialize TTS engine
-engine = pyttsx3.init()
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# Check for required environment variables
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-print(GROQ_API_KEY)
-if not GROQ_API_KEY:
-    raise RuntimeError("❌ Missing required GROQ_API_KEY.")
-
-# Initialize Groq client
-client = Groq(api_key=GROQ_API_KEY)
-
-# Extract audio from video
-def extract_audio_from_video(video_path):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio_file:
-        with VideoFileClip(video_path) as video:
-            video.audio.write_audiofile(temp_audio_file.name, codec="mp3")
-        return temp_audio_file.name
-
-# Transcribe audio
-def transcribe_audio(audio_path):
-    with open(audio_path, "rb") as file:
-        transcription = client.audio.transcriptions.create(
-            file=(os.path.basename(audio_path), file.read()),
-            model="whisper-large-v3",
-            response_format="json",
-            language="en",
-            temperature=0.0,
-        )
-    return transcription.text
-
-# Text-to-audio conversion
-def text_to_audio_file(text, filename):
-    engine.setProperty('rate', 150)
-    engine.setProperty('volume', 1)
-    engine.save_to_file(text, filename)
-    engine.runAndWait()
-    return filename
-
-# Custom Groq-based question-answering function
-def groq_question_answer(question, context):
-    try:
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant. Answer the user's question based on the provided context."},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{question}"}
-        ]
-        response = client.chat.completions.create(
-            messages=messages,
-            model="llama3-8b-8192",
-            temperature=0.5,
-            max_tokens=150
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        raise RuntimeError(f"Error in fetching answer: {str(e)}")
-    
-@app.get("/")
-async def root():
-    return {"message": "Hello from FastAPI!"}
-
-@app.post("/transcribe/")
+# ============================================================
+# /transcribe
+# Frontend sends: FormData { file: <audio/video> }
+# Frontend expects back: { transcription: "..." }
+#                         ↑ this exact key name matters
+# ============================================================
+@app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix="." + file.filename.split(".")[-1]) as temp_file:
-            temp_file.write(await file.read())
-            temp_file_path = temp_file.name
+        # Save upload to a temp file so Groq can read it
+        suffix = os.path.splitext(file.filename)[1] or ".wav"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(await file.read())
+            tmp_path = tmp.name
 
-        if file.content_type.startswith("video"):
-            audio_path = extract_audio_from_video(temp_file_path)
-            os.unlink(temp_file_path)
-            temp_file_path = audio_path
+        # Call Groq Whisper-large-v3
+        with open(tmp_path, "rb") as f:
+            result = client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=f,
+                response_format="text"   # returns plain string
+            )
 
-        transcription = transcribe_audio(temp_file_path)
-        os.unlink(temp_file_path)
+        os.unlink(tmp_path)  # delete temp file
 
-        return JSONResponse({"transcription": transcription})
+        # Save to DB (no summary yet — that comes in /summarize)
+        db = SessionLocal()
+        meeting = Meeting(transcript=result)
+        db.add(meeting)
+        db.commit()
+        db.refresh(meeting)
+        db.close()
+
+        # KEY: frontend reads response.data.transcription
+        return JSONResponse({"transcription": result})
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/summarize/")
+
+# ============================================================
+# /summarize
+# Frontend sends: FormData { transcription: "..." }
+# Frontend expects back: { summary: "..." }
+# ============================================================
+@app.post("/summarize")
 async def summarize(transcription: str = Form(...)):
     try:
         response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that summarizes text."},
-                {"role": "user", "content": f"Please summarize the following transcription:\n\n{transcription}"}
-            ],
-            model="llama-3.2-90b-text-preview",
-            temperature=0.5,
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a professional meeting analyst. Given a transcript, produce:\n"
+                        "1. EXECUTIVE SUMMARY (3 paragraphs)\n"
+                        "2. ACTION ITEMS (numbered list, include owner and deadline if mentioned)\n"
+                        "Be concise and professional."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Transcript:\n\n{transcription}"
+                }
+            ]
         )
-        summary = response.choices[0].message.content
-        return JSONResponse({"summary": summary})
+        summary_text = response.choices[0].message.content
+
+        # Update the most recent DB record with the summary
+        db = SessionLocal()
+        meeting = db.query(Meeting).order_by(Meeting.id.desc()).first()
+        if meeting:
+            meeting.summary = summary_text
+            db.commit()
+        db.close()
+
+        return JSONResponse({"summary": summary_text})
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/convert-audio/")
-async def convert_audio(summary: str = Form(...)):
-    try:
-        audio_path = "summary_audio.wav"
-        audio_path = text_to_audio_file(summary, audio_path)
-        return FileResponse(audio_path, media_type="audio/wav", filename="summary_audio.wav")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/question/")
+# ============================================================
+# /question
+# Frontend sends: FormData { question: "...", context: "..." }
+# Frontend expects back: { answer: "..." }
+# ============================================================
+@app.post("/question")
 async def ask_question(question: str = Form(...), context: str = Form(...)):
     try:
-        answer = groq_question_answer(question, context)
-        return JSONResponse({"answer": answer})
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful assistant. Answer questions strictly based on "
+                        "the provided meeting context. If the answer isn't in the context, "
+                        "say 'This wasn't discussed in the meeting.'"
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Meeting context:\n{context}\n\nQuestion: {question}"
+                }
+            ]
+        )
+        return JSONResponse({"answer": response.choices[0].message.content})
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# /meetings — history of all past meetings
+# ============================================================
+@app.get("/meetings")
+def get_meetings():
+    db = SessionLocal()
+    meetings = db.query(Meeting).order_by(Meeting.created_at.desc()).all()
+    db.close()
+    return JSONResponse([{
+        "id": m.id,
+        "meeting_name": m.meeting_name,
+        "created_at": m.created_at.isoformat(),
+        "preview": (m.summary or m.transcript or "")[:120] + "..."
+    } for m in meetings])
+
+
+@app.get("/meetings/{meeting_id}")
+def get_meeting(meeting_id: int):
+    db = SessionLocal()
+    m = db.query(Meeting).filter(Meeting.id == meeting_id).first()
+    db.close()
+    if not m:
+        raise HTTPException(status_code=404, detail="Not found")
+    return JSONResponse({
+        "id": m.id,
+        "meeting_name": m.meeting_name,
+        "transcript": m.transcript,
+        "summary": m.summary,
+        "created_at": m.created_at.isoformat()
+    })
