@@ -1,202 +1,281 @@
-# ============================================================
-# SyncMind Backend — app.py (Frontend-Compatible Version)
-# Matches exact endpoint names and response keys that
-# page.js expects: /transcribe, /summarize, /question
-# ============================================================
-
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from groq import Groq
-from dotenv import load_dotenv
 import os
+import json
+import sqlite3
 import tempfile
+import uuid
+import subprocess
+import re
 
-# Database imports
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from datetime import datetime
-
+from dotenv import load_dotenv
 load_dotenv()
 
-# ============================================================
-# DATABASE SETUP
-# SQLite = zero config, single file (syncmind.db appears in
-# your backend folder automatically on first run)
-# ============================================================
-engine = create_engine(
-    "sqlite:///./syncmind.db",
-    connect_args={"check_same_thread": False}
-)
-Base = declarative_base()
-SessionLocal = sessionmaker(bind=engine)
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from groq import Groq
 
-class Meeting(Base):
-    __tablename__ = "meetings"
-    id          = Column(Integer, primary_key=True, index=True)
-    meeting_name = Column(String, default="Untitled Meeting")
-    transcript  = Column(Text)
-    summary     = Column(Text)
-    created_at  = Column(DateTime, default=datetime.utcnow)
+app = Flask(__name__)
+# Crucial networking configuration: allow clean local resource handshakes
+CORS(app, origins=["http://localhost:3000"])
 
-Base.metadata.create_all(bind=engine)
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+DB_PATH = os.path.join(os.path.dirname(__file__), "syncmind.db")
 
-# ============================================================
-# APP + GROQ CLIENT
-# ============================================================
-app = FastAPI()
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS meetings (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            transcript TEXT,
+            summary TEXT,
+            key_points TEXT,
+            decisions TEXT,
+            sentiment TEXT,
+            topics TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            duration TEXT
+        );
+        CREATE TABLE IF NOT EXISTS action_items (
+            id TEXT PRIMARY KEY,
+            meeting_id TEXT NOT NULL,
+            task TEXT NOT NULL,
+            assignee TEXT DEFAULT 'Mansvi',
+            deadline TEXT,
+            priority TEXT DEFAULT 'medium',
+            completed INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (meeting_id) REFERENCES meetings(id)
+        );
+    """)
+    conn.commit()
+    conn.close()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+init_db()
 
-# ============================================================
-# /transcribe
-# Frontend sends: FormData { file: <audio/video> }
-# Frontend expects back: { transcription: "..." }
-#                         ↑ this exact key name matters
-# ============================================================
-@app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
+def denoise_audio(input_path, output_path):
     try:
-        # Save upload to a temp file so Groq can read it
-        suffix = os.path.splitext(file.filename)[1] or ".wav"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(await file.read())
-            tmp_path = tmp.name
+        subprocess.run([
+            'ffmpeg', '-y', '-i', input_path,
+            '-af', 'highpass=f=200,lowpass=f=3000,afftdn=nf=-25',
+            '-ar', '16000', '-ac', '1',
+            output_path
+        ], capture_output=True, timeout=120)
+        return output_path if os.path.exists(output_path) else input_path
+    except Exception:
+        return input_path
 
-        # Call Groq Whisper-large-v3
-        with open(tmp_path, "rb") as f:
-            result = client.audio.transcriptions.create(
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "message": "SyncMind backend running"})
+
+@app.route('/api/transcribe', methods=['POST'])
+def transcribe():
+    if 'audio' not in request.files:
+        return jsonify({"error": "No audio file provided"}), 400
+
+    audio_file = request.files['audio']
+    title = request.form.get('title', 'Untitled Meeting')
+
+    suffix = os.path.splitext(audio_file.filename)[1] or '.webm'
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        audio_file.save(tmp.name)
+        original_path = tmp.name
+
+    denoised_path = original_path + '_denoised.wav'
+    final_path = denoise_audio(original_path, denoised_path)
+
+    try:
+        with open(final_path, 'rb') as f:
+            transcription = client.audio.transcriptions.create(
+                file=(os.path.basename(final_path), f),
                 model="whisper-large-v3",
-                file=f,
-                response_format="text"   # returns plain string
+                language="en",
+                response_format="verbose_json"
             )
 
-        os.unlink(tmp_path)  # delete temp file
+        transcript_text = transcription.text
+        
+        # Core AI Processing Leap
+        insights = extract_insights(transcript_text)
 
-        # Save to DB (no summary yet — that comes in /summarize)
-        db = SessionLocal()
-        meeting = Meeting(transcript=result)
-        db.add(meeting)
-        db.commit()
-        db.refresh(meeting)
-        db.close()
+        meeting_id = str(uuid.uuid4())
+        conn = get_db()
+        conn.execute(
+            """INSERT INTO meetings (id, title, transcript, summary, key_points, decisions, sentiment, topics, duration)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                meeting_id, title, transcript_text,
+                insights.get('summary', 'No summary generated.'),
+                json.dumps(insights.get('keyPoints') or insights.get('key_points') or []),
+                json.dumps(insights.get('decisions', [])),
+                insights.get('sentiment', 'neutral'),
+                json.dumps(insights.get('topics', [])),
+                insights.get('duration_estimate') or insights.get('duration') or 'Unknown'
+            )
+        )
+        
+        # PERFECTED NORMALIZATION LAYER: Checks both naming conventions to prevent dropping arrays
+        action_items_list = insights.get('actionItems') or insights.get('action_items') or []
 
-        # KEY: frontend reads response.data.transcription
-        return JSONResponse({"transcription": result})
+        for item in action_items_list:
+            conn.execute(
+                """INSERT INTO action_items (id, meeting_id, task, assignee, deadline, priority, completed)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid.uuid4()), meeting_id,
+                    item.get('task') or item.get('description') or 'Unspecified task metric',
+                    item.get('assignee') or 'Mansvi',
+                    item.get('deadline') or 'None specified',
+                    item.get('priority', 'medium'),
+                    0
+                )
+            )
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "meeting_id": meeting_id,
+            "transcript": transcript_text,
+            "insights": insights
+        })
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
+    finally:
+        for p in [original_path, denoised_path]:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
-
-# ============================================================
-# /summarize
-# Frontend sends: FormData { transcription: "..." }
-# Frontend expects back: { summary: "..." }
-# ============================================================
-@app.post("/summarize")
-async def summarize(transcription: str = Form(...)):
+def extract_insights(transcript):
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+        chat = client.chat.completions.create(
+            model="llama3-70b-8192",
+            temperature=0.1,  
+            response_format={"type": "json_object"},  
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a professional meeting analyst. Given a transcript, produce:\n"
-                        "1. EXECUTIVE SUMMARY (3 paragraphs)\n"
-                        "2. ACTION ITEMS (numbered list, include owner and deadline if mentioned)\n"
-                        "Be concise and professional."
-                    )
+                    "content": "You are SyncMind, an AI analytics engine. Extract key metrics, explicit summaries, and track exact task assignments and deadlines mentioned in meeting transcripts. Respond with zero conversational filler text. Output must be raw JSON matching the requested fields."
                 },
                 {
                     "role": "user",
-                    "content": f"Transcript:\n\n{transcription}"
+                    "content": f"""Analyze this transcript and return a valid JSON object matching this structure:
+{{
+  "summary": "Provide a complete, detailed paragraph summarizing the critical architectural discussion points and deployment roadmap milestones mentioned.",
+  "keyPoints": ["Key technical point or milestone 1", "Key technical point or milestone 2"],
+  "actionItems": [
+    {{
+      "task": "The precise action item work description details mentioned",
+      "assignee": "Extract the exact name of the player or employee assigned to this task. If no name is mentioned, use 'Unassigned'.",
+      "deadline": "Extract explicit deadline details, target days, or timeline information mentioned for this task. If none, use 'None specified'.",
+      "priority": "high | medium | low",
+      "completed": false
+    }}
+  ],
+  "decisions": ["Important collective decision or agreement 1"],
+  "sentiment": "positive | neutral | mixed | tense",
+  "duration_estimate": "Estimated verbal track layout length",
+  "topics": ["Core technical framework topic 1", "Topic 2"]
+}}
+
+Transcript:
+{transcript}"""
                 }
             ]
         )
-        summary_text = response.choices[0].message.content
-
-        # Update the most recent DB record with the summary
-        db = SessionLocal()
-        meeting = db.query(Meeting).order_by(Meeting.id.desc()).first()
-        if meeting:
-            meeting.summary = summary_text
-            db.commit()
-        db.close()
-
-        return JSONResponse({"summary": summary_text})
-
+        raw = chat.choices[0].message.content.strip()
+        return json.loads(raw)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Extraction Pipeline Intercepted Crash: {str(e)}")
+        try:
+            match = re.search(r'\{[\s\S]*\}', raw)
+            if match:
+                return json.loads(match.group(0))
+        except Exception:
+            pass
+        return {
+            "summary": "Data stream analytical breakdown failed.",
+            "keyPoints": [],
+            "actionItems": [],
+            "decisions": [],
+            "sentiment": "neutral",
+            "duration_estimate": "Unknown",
+            "topics": []
+        }
 
-
-# ============================================================
-# /question
-# Frontend sends: FormData { question: "...", context: "..." }
-# Frontend expects back: { answer: "..." }
-# ============================================================
-@app.post("/question")
-async def ask_question(question: str = Form(...), context: str = Form(...)):
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a helpful assistant. Answer questions strictly based on "
-                        "the provided meeting context. If the answer isn't in the context, "
-                        "say 'This wasn't discussed in the meeting.'"
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"Meeting context:\n{context}\n\nQuestion: {question}"
-                }
-            ]
-        )
-        return JSONResponse({"answer": response.choices[0].message.content})
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============================================================
-# /meetings — history of all past meetings
-# ============================================================
-@app.get("/meetings")
+@app.route('/api/meetings', methods=['GET'])
 def get_meetings():
-    db = SessionLocal()
-    meetings = db.query(Meeting).order_by(Meeting.created_at.desc()).all()
-    db.close()
-    return JSONResponse([{
-        "id": m.id,
-        "meeting_name": m.meeting_name,
-        "created_at": m.created_at.isoformat(),
-        "preview": (m.summary or m.transcript or "")[:120] + "..."
-    } for m in meetings])
+    conn = get_db()
+    meetings = conn.execute("SELECT * FROM meetings ORDER BY created_at DESC").fetchall()
+    result = []
+    for m in meetings:
+        items = conn.execute("SELECT * FROM action_items WHERE meeting_id = ?", (m['id'],)).fetchall()
+        result.append({
+            **dict(m),
+            "key_points": json.loads(m['key_points'] or '[]'),
+            "decisions": json.loads(m['decisions'] or '[]'),
+            "topics": json.loads(m['topics'] or '[]'),
+            "action_items": [dict(i) for i in items]
+        })
+    conn.close()
+    return jsonify(result)
 
-
-@app.get("/meetings/{meeting_id}")
-def get_meeting(meeting_id: int):
-    db = SessionLocal()
-    m = db.query(Meeting).filter(Meeting.id == meeting_id).first()
-    db.close()
+@app.route('/api/meetings/<meeting_id>', methods=['GET'])
+def get_meeting(meeting_id):
+    conn = get_db()
+    m = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
     if not m:
-        raise HTTPException(status_code=404, detail="Not found")
-    return JSONResponse({
-        "id": m.id,
-        "meeting_name": m.meeting_name,
-        "transcript": m.transcript,
-        "summary": m.summary,
-        "created_at": m.created_at.isoformat()
-    })
+        return jsonify({"error": "Not found"}), 404
+    items = conn.execute("SELECT * FROM action_items WHERE meeting_id = ?", (meeting_id,)).fetchall()
+    result = {
+        **dict(m),
+        "key_points": json.loads(m['key_points'] or '[]'),
+        "decisions": json.loads(m['decisions'] or '[]'),
+        "topics": json.loads(m['topics'] or '[]'),
+        "action_items": [dict(i) for i in items]
+    }
+    conn.close()
+    return jsonify(result)
+
+@app.route('/api/meetings/<meeting_id>', methods=['DELETE'])
+def delete_meeting(meeting_id):
+    conn = get_db()
+    conn.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
+    conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/action-items/<item_id>/toggle', methods=['PATCH'])
+def toggle_action_item(item_id):
+    conn = get_db()
+    item = conn.execute("SELECT * FROM action_items WHERE id = ?", (item_id,)).fetchone()
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    new_status = 0 if item['completed'] else 1
+    conn.execute("UPDATE action_items SET completed = ? WHERE id = ?", (new_status, item_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"completed": bool(new_status)})
+
+@app.route('/api/action-items', methods=['GET'])
+def get_all_action_items():
+    conn = get_db()
+    items = conn.execute(
+        """SELECT a.*, m.title as meeting_title
+           FROM action_items a
+           JOIN meetings m ON a.meeting_id = m.id
+           ORDER BY a.created_at DESC"""
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(i) for i in items])
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)   

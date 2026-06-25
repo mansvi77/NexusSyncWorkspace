@@ -1,0 +1,25 @@
+* [33mf017694[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m Initial commit
+* [33me62fa90[m[33m ([m[1;31morigin/master[m[33m, [m[1;31morigin/HEAD[m[33m)[m Update page.js
+* [33m58f09f0[m Update page.js
+* [33m479e53a[m added backend endpoint
+* [33mca6c517[m changes in backend
+* [33m36d3195[m updated some components
+* [33m846fbe8[m update vercel
+* [33md038cee[m updated readme
+* [33m737b1dd[m updated easier update of endpoint of backend
+* [33m4e16a37[m set up backend for deployment
+* [33m21d408b[m Updated readme
+*   [33m0f5ad27[m Merge pull request #2 from HarpreetSinghjhiwant/master
+[32m|[m[33m\[m  
+[32m|[m *   [33mc0c0928[m Merge branch 'master' of https://github.com/HarpreetSinghjhiwant/meetings_app
+[32m|[m [34m|[m[32m\[m  
+[32m|[m [34m|[m[32m/[m  
+[32m|[m[32m/[m[34m|[m   
+* [34m|[m   [33m027db41[m Merge pull request #1 from HarpreetSinghjhiwant/master
+[36m|[m[1;31m\[m [34m\[m  
+[36m|[m [1;31m|[m * [33mf21dc11[m Updated UI
+[36m|[m [1;31m|[m[1;31m/[m  
+[36m|[m * [33m8006236[m Completed Project
+[36m|[m[36m/[m  
+* [33m4d457b8[m Created meetings app
+* [33m4c8de4c[m Initial commit from Create Next App
