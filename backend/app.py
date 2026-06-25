@@ -156,8 +156,8 @@ def transcribe():
 def extract_insights(transcript):
     try:
         chat = client.chat.completions.create(
-            model="llama3-70b-8192",
-            temperature=0.1,  
+           model="llama-3.1-70b-versatile",
+            temperature=0.1,     
             response_format={"type": "json_object"},  
             messages=[
                 {
