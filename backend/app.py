@@ -86,7 +86,7 @@ def transcribe():
         audio_file.save(tmp.name)
         original_path = tmp.name
 
-    denoised_path = original_path + '_denoised.wav'
+    denoised_path = original_path + '_denoised.wav'  
     final_path = denoise_audio(original_path, denoised_path)
 
     try:
@@ -156,52 +156,54 @@ def transcribe():
 def extract_insights(transcript):
     try:
         chat = client.chat.completions.create(
-           model="llama-3.1-70b-versatile",
-            temperature=0.1,     
+            model="llama-3.1-70b-versatile",
+            temperature=0.0,  # Absolute zero temperature forces strict deterministic JSON outputs
             response_format={"type": "json_object"},  
             messages=[
                 {
                     "role": "system",
-                    "content": "You are SyncMind, an AI analytics engine. Extract key metrics, explicit summaries, and track exact task assignments and deadlines mentioned in meeting transcripts. Respond with zero conversational filler text. Output must be raw JSON matching the requested fields."
+                    "content": "You are SyncMind, an automated JSON metadata generator. Your output must be a clean, single stringified JSON object containing keys: summary, keyPoints, actionItems, decisions, sentiment, duration_estimate, and topics. Do not write text wrappers or conversational prefaces."
                 },
                 {
                     "role": "user",
-                    "content": f"""Analyze this transcript and return a valid JSON object matching this structure:
+                    "content": f"""Analyze this meeting transcript and output a valid JSON object matching this structure:
 {{
-  "summary": "Provide a complete, detailed paragraph summarizing the critical architectural discussion points and deployment roadmap milestones mentioned.",
-  "keyPoints": ["Key technical point or milestone 1", "Key technical point or milestone 2"],
+  "summary": "Detailed paragraph summarizing the core systems roadmap discussed.",
+  "keyPoints": ["Technical milestone 1", "Technical milestone 2"],
   "actionItems": [
     {{
-      "task": "The precise action item work description details mentioned",
-      "assignee": "Extract the exact name of the player or employee assigned to this task. If no name is mentioned, use 'Unassigned'.",
-      "deadline": "Extract explicit deadline details, target days, or timeline information mentioned for this task. If none, use 'None specified'.",
+      "task": "Precise workload tracking details",
+      "assignee": "Name of the player, or 'Unassigned'",
+      "deadline": "Deadline details or 'None specified'",
       "priority": "high | medium | low",
       "completed": false
     }}
   ],
-  "decisions": ["Important collective decision or agreement 1"],
+  "decisions": ["Agreed tactical alignment 1"],
   "sentiment": "positive | neutral | mixed | tense",
-  "duration_estimate": "Estimated verbal track layout length",
-  "topics": ["Core technical framework topic 1", "Topic 2"]
+  "duration_estimate": "Estimated verbal track length",
+  "topics": ["Core technical framework topic 1"]
 }}
 
-Transcript:
+Transcript to evaluate:
 {transcript}"""
                 }
             ]
         )
-        raw = chat.choices[0].message.content.strip()
-        return json.loads(raw)
+        
+        raw_content = chat.choices[0].message.content.strip()
+        
+        # Self-Healing Layer 1: Clean out markdown block backticks if present
+        raw_content = re.sub(r'^```json\s*', '', raw_content, flags=re.IGNORECASE)
+        raw_content = re.sub(r'^```\s*', '', raw_content)
+        raw_content = re.sub(r'\s*```$', '', raw_content)
+        
+        return json.loads(raw_content)
+        
     except Exception as e:
-        print(f"Extraction Pipeline Intercepted Crash: {str(e)}")
-        try:
-            match = re.search(r'\{[\s\S]*\}', raw)
-            if match:
-                return json.loads(match.group(0))
-        except Exception:
-            pass
+        print(f"Error parsing insights: {e}")
         return {
-            "summary": "Data stream analytical breakdown failed.",
+            "summary": "Failed to generate summary.",
             "keyPoints": [],
             "actionItems": [],
             "decisions": [],
@@ -210,72 +212,6 @@ Transcript:
             "topics": []
         }
 
-@app.route('/api/meetings', methods=['GET'])
-def get_meetings():
-    conn = get_db()
-    meetings = conn.execute("SELECT * FROM meetings ORDER BY created_at DESC").fetchall()
-    result = []
-    for m in meetings:
-        items = conn.execute("SELECT * FROM action_items WHERE meeting_id = ?", (m['id'],)).fetchall()
-        result.append({
-            **dict(m),
-            "key_points": json.loads(m['key_points'] or '[]'),
-            "decisions": json.loads(m['decisions'] or '[]'),
-            "topics": json.loads(m['topics'] or '[]'),
-            "action_items": [dict(i) for i in items]
-        })
-    conn.close()
-    return jsonify(result)
-
-@app.route('/api/meetings/<meeting_id>', methods=['GET'])
-def get_meeting(meeting_id):
-    conn = get_db()
-    m = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-    if not m:
-        return jsonify({"error": "Not found"}), 404
-    items = conn.execute("SELECT * FROM action_items WHERE meeting_id = ?", (meeting_id,)).fetchall()
-    result = {
-        **dict(m),
-        "key_points": json.loads(m['key_points'] or '[]'),
-        "decisions": json.loads(m['decisions'] or '[]'),
-        "topics": json.loads(m['topics'] or '[]'),
-        "action_items": [dict(i) for i in items]
-    }
-    conn.close()
-    return jsonify(result)
-
-@app.route('/api/meetings/<meeting_id>', methods=['DELETE'])
-def delete_meeting(meeting_id):
-    conn = get_db()
-    conn.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
-    conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"success": True})
-
-@app.route('/api/action-items/<item_id>/toggle', methods=['PATCH'])
-def toggle_action_item(item_id):
-    conn = get_db()
-    item = conn.execute("SELECT * FROM action_items WHERE id = ?", (item_id,)).fetchone()
-    if not item:
-        return jsonify({"error": "Not found"}), 404
-    new_status = 0 if item['completed'] else 1
-    conn.execute("UPDATE action_items SET completed = ? WHERE id = ?", (new_status, item_id))
-    conn.commit()
-    conn.close()
-    return jsonify({"completed": bool(new_status)})
-
-@app.route('/api/action-items', methods=['GET'])
-def get_all_action_items():
-    conn = get_db()
-    items = conn.execute(
-        """SELECT a.*, m.title as meeting_title
-           FROM action_items a
-           JOIN meetings m ON a.meeting_id = m.id
-           ORDER BY a.created_at DESC"""
-    ).fetchall()
-    conn.close()
-    return jsonify([dict(i) for i in items])
-
+# Execution wrapper to start up the local server
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)   
+    app.run(debug=True, host='0.0.0.0', port=5000)
