@@ -1,84 +1,199 @@
-# Meetings Summarizer
+# NexusSyncWorkspace
 
-This project is a Meetings Summarizer built with **FastAPI** on the backend and a **React** frontend. It allows users to upload video or audio files, transcribe content, summarize it, ask contextual questions, and convert summaries to audio.
+**NexusSyncWorkspace** is an AI-powered meeting intelligence platform that converts meeting recordings into structured transcripts, summaries, key decisions, and actionable tasks.
 
-## Features
+It uses a **Next.js + React frontend**, **Flask backend**, **Groq Whisper for transcription**, **Llama 3 for meeting analysis**, and **SQLite for persistence**.
 
-### Backend (FastAPI)
-- **Transcription**: Extract audio from video files and transcribe it using the Groq Whisper model.
-- **Summarization**: Summarize the transcription with an AI model.
-- **Question Answering**: Ask contextual questions based on the transcription or summary.
-- **Text-to-Speech**: Convert text summaries into audio files.
-- **CORS Support**: Full support for cross-origin requests.
+---
 
-### Frontend (React)
-- **File Upload**: Upload videos or audio files directly from the browser.
-- **Real-time Updates**: Display transcriptions, summaries, and answers dynamically.
-- **Audio Playback**: Listen to AI-generated audio summaries.
-- **Responsive UI**: Styled with modern UI components and animations.
+## ✨ Features
 
-## Tech Stack
+* 🎙️ Upload meeting audio recordings
+* 📝 Automatic speech-to-text transcription
+* 🤖 AI-generated meeting summaries
+* ✅ Automatic action-item extraction
+* 📌 Key decision extraction
+* 📊 Meeting and task dashboard
+* 🔎 Meeting search and filtering
+* 💾 Persistent meeting data storage
+
+---
+
+## 🛠️ Tech Stack
+
+| Layer             | Technologies               |
+| ----------------- | -------------------------- |
+| **Frontend**      | Next.js, React, JavaScript |
+| **Styling**       | Tailwind CSS               |
+| **Backend**       | Python, Flask              |
+| **AI / ML**       | Groq Whisper, Llama 3      |
+| **Database**      | SQLite                     |
+| **Communication** | REST APIs, Fetch API       |
+| **Configuration** | Environment Variables      |
+
+---
+
+## 🏗️ Architecture
+
+```text
+User
+ │
+ ▼
+Next.js / React
+ │
+ │ REST API
+ ▼
+Flask Backend
+ │
+ ├──► Groq Whisper
+ │       │
+ │       ▼
+ │    Transcript
+ │
+ ├──► Llama 3
+ │       │
+ │       ▼
+ │  Summary + Decisions + Tasks
+ │
+ ▼
+SQLite Database
+ │
+ ▼
+JSON Response
+ │
+ ▼
+Next.js Dashboard
+```
+
+---
+
+## 🔄 Workflow
+
+1. User uploads a meeting recording through the Next.js frontend.
+2. `UploadZone.js` sends the audio to the Flask `/api/upload` endpoint.
+3. Flask sends the audio to **Groq Whisper** for transcription.
+4. The transcript is passed to **Llama 3** for summarization and action-item extraction.
+5. The structured meeting data is stored in **SQLite**.
+6. Flask returns the processed data as JSON.
+7. React updates the dashboard with meetings, summaries, and tasks.
+
+```text
+Audio
+  ↓
+Whisper
+  ↓
+Transcript
+  ↓
+Llama 3
+  ↓
+Summary + Decisions + Tasks
+  ↓
+SQLite
+  ↓
+Dashboard
+```
+
+---
+
+## 📂 Project Structure
+
+```text
+NexusSyncWorkspace/
+│
+├── backend/
+│   ├── app.py
+│   ├── syncmind.db
+│   ├── requirements.txt
+│   └── .env
+│
+├── nexus-sync-front/
+│   ├── app/
+│   │   ├── layout.js
+│   │   ├── page.js
+│   │   └── globals.css
+│   │
+│   └── components/
+│       ├── Sidebar.js
+│       ├── UploadZone.js
+│       ├── MeetingCard.js
+│       ├── MeetingDetail.js
+│       ├── TasksPanel.js
+│       └── StatsBar.js
+│
+└── README.md
+```
+
+---
+
+## ⚙️ Getting Started
 
 ### Backend
-- **FastAPI**: For building RESTful APIs.
-- **Groq API**: For transcription and AI processing.
-- **Pyttsx3**: For text-to-speech.
-- **MoviePy**: For extracting audio from video.
-- **Pydub**: For audio processing.
-- **dotenv**: For environment variable management.
+
+```bash
+cd backend
+
+python -m venv venv
+venv\Scripts\activate
+
+pip install -r requirements.txt
+```
+
+Create a `.env` file:
+
+```env
+GROQ_API_KEY=your_groq_api_key
+```
+
+Run the backend:
+
+```bash
+python app.py
+```
+
+Backend:
+
+```text
+http://localhost:5000
+```
 
 ### Frontend
-- **React**: For building the user interface.
-- **Framer Motion**: For animations.
-- **Axios**: For API requests.
-- **ShadCN Components**: For styling UI components.
-- **Lucide React Icons**: For modern SVG icons.
 
-## Installation
+```bash
+cd nexus-sync-front
+npm install
+npm run dev
+```
 
-### Backend
+Frontend:
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Amanbig/meetings_app.git
-   ```
+```text
+http://localhost:3000
+```
 
-2. Run Frontend:
-    ```bash
-    npm run dev
-    ```
+---
 
-3. Create a virtual environment and activate it:
-    ```bash
-    cd meetings_app/backend
-    python -m venv venv
-    source venv/bin/activate   # On Windows: venv\Scripts\activate
-    ```
+## 🔐 Environment Variables
 
-4. Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
+```env
+GROQ_API_KEY=your_groq_api_key
+```
 
-5. Set up environment variables: Create a .env file and add your Groq API key:
-    ```
-    GROQ_API_KEY=<your-groq-api-key>
-    ```
-6. Set the backend api
-    Make changes in the urls.js file with your endpoint
-    ```javascript
-    var endpoint = 'your_endpoint_here';
-    ```
+> Never commit `.env` or API keys to the repository.
 
-6. Run the backend
-    ```bash
-    fastapi dev app.py
-    ```
+---
 
-## Contributing
+## 🚀 Future Scope
 
-1. **Fork the repository** on GitHub.
-2. **Create a new branch** (`git checkout -b feature/YourFeature`).
-3. **Make your changes** and commit (`git commit -am 'Add new feature'`).
-4. **Push to the branch** (`git push origin feature/YourFeature`).
-5. **Create a new Pull Request for the changes made**.
+* PostgreSQL for scalable persistence
+* User authentication and multi-user workspaces
+* Speaker identification
+* Semantic meeting search
+* Calendar and Slack integrations
+* Background processing for large recordings
+* Cloud deployment and object storage
+
+---
+
+## 👩‍💻 Project Goal
+
+**NexusSyncWorkspace transforms unstructured meeting conversations into structured, actionable intelligence — reducing the effort required to review meetings and track follow-up tasks.**
